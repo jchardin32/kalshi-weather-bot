@@ -11,9 +11,10 @@ from kalshi_python_sync import Configuration, KalshiClient
 load_dotenv()
 
 # ================== CONFIG ==================
-BANKROLL = 1000          # your $1000 demo bankroll
+BANKROLL = 1000
+RISK_PER_TRADE = 0.02
 EDGE_THRESHOLD = 4
-DEMO_MODE = True         # change to False when ready for real money
+DEMO_MODE = True
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # ============================================
@@ -31,26 +32,34 @@ config.private_key_pem = private_key_pem
 client = KalshiClient(config)
 
 CITY_COORDS = {
-    "NYC": (40.7128, -74.0060),
-    "CHI": (41.8781, -87.6298),
-    "MIA": (25.7617, -80.1918),
-    "LAX": (34.0522, -118.2437),
+    "NYC": (40.7128, -74.0060), "CHI": (41.8781, -87.6298),
+    "MIA": (25.7617, -80.1918), "LAX": (34.0522, -118.2437),
+    "AUS": (30.2672, -97.7431), "DEN": (39.7392, -104.9903),
+    "BOS": (42.3601, -71.0589), "SEA": (47.6062, -122.3321),
+    "PHL": (39.9526, -75.1652), "ATL": (33.7490, -84.3880),
+    "DFW": (32.7767, -96.7970), "HOU": (29.7604, -95.3698),
+    "PHX": (33.4484, -112.0740),
 }
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                      json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
     except:
         pass
 
 def parse_ticker(ticker):
-    match = re.search(r'KXTEMP([A-Z]+)-(\d{2}[A-Z]{3}\d{2})(\d{2})-T(\d+\.\d+)', ticker.upper())
+    match = re.search(r'KX(TEMP|HIGH|LOWT)([A-Z]+)-(\d{2}[A-Z]{3}\d{2})(\d{2})?-?T?(\d+\.\d+)?', ticker.upper())
     if match:
-        return match.group(1), match.group(2), int(match.group(3)), float(match.group(4))
-    return None, None, None, None
+        mtype = match.group(1)
+        city = match.group(2)
+        date = match.group(3)
+        hour = int(match.group(4)) if match.group(4) else None
+        thresh = float(match.group(5)) if match.group(5) else None
+        return city, date, hour, thresh, mtype
+    return None, None, None, None, None
 
 def get_model_prob(lat, lon, target_hour, threshold_f):
     url = "https://api.open-meteo.com/v1/forecast"
@@ -59,7 +68,7 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
         r = requests.get(url, params=params, timeout=15)
         data = r.json()
         temps = data.get("hourly", {}).get("temperature_2m", [])
-        if temps and target_hour < len(temps):
+        if temps and target_hour is not None and target_hour < len(temps):
             forecast = temps[target_hour]
             deviation = forecast - threshold_f
             prob = max(5, min(95, int(50 + deviation * 9.5)))
@@ -68,66 +77,62 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
         pass
     return 50, None
 
-def place_order(ticker, side, count, price_cents):
-    if DEMO_MODE:
-        print(f"   [DEMO] Would place {side} {count} @ {price_cents}¢")
-        return
-    # live order code (same as before)
-    try:
-        order_data = {"ticker": ticker, "action": "buy" if side == "yes" else "sell", "side": "yes", "count": count, "type": "limit", "yes_price" if side == "yes" else "no_price": price_cents, "client_order_id": str(uuid.uuid4())}
-        client.create_order(order_data)
-        print(f"   ✅ LIVE ORDER PLACED")
-    except Exception as e:
-        print(f"   Order failed: {e}")
-
-send_telegram("🚀 Kalshi weather bot started — 24/7 on Railway\nBankroll: $" + str(BANKROLL) + " | Demo: " + str(DEMO_MODE))
-
-print("🚀 Bot running 24/7 with Telegram alerts")
+print("🚀 MAXIMIZED Kalshi weather bot (fixed version) running — 13 cities")
 
 while True:
     try:
-        markets_response = client.get_markets(status="open", limit=200)
-        markets = markets_response.markets if hasattr(markets_response, 'markets') else []
-        
-        print(f"\n{datetime.now().strftime('%Y-%m-%d %H:%M')} — Scanning...")
-        
+        resp = requests.get(f"{HOST}/markets", params={"status": "open", "limit": 200}, timeout=15)
+        markets = resp.json().get("markets", []) if resp.ok else []
+
+        print(f"\n{datetime.now().strftime('%Y-%m-%d %H:%M')} — Scanning {len(markets)} markets...")
+
+        edges_found = 0
         for m in markets:
-            ticker = getattr(m, 'ticker', '')
-            if not ticker.startswith("KXTEMP"):
+            try:
+                ticker = m.get("ticker", "")
+                if not ticker.startswith("KX"):
+                    continue
+
+                city_code, date_str, hour, threshold, market_type = parse_ticker(ticker)
+                if not city_code or city_code not in CITY_COORDS or threshold is None:
+                    continue
+
+                yes_price = m.get("yes_price") or 50
+                lat, lon = CITY_COORDS[city_code]
+
+                model_prob, forecast = get_model_prob(lat, lon, hour, threshold)
+                edge = model_prob - yes_price
+
+                # Log to CSV
+                with open("weather_scans.csv", "a", newline="") as f:
+                    writer = csv.writer(f)
+                    if f.tell() == 0:
+                        writer.writerow(["timestamp", "ticker", "city", "threshold_f", "kalshi_yes", "model_prob", "forecast_f", "edge_cents"])
+                    writer.writerow([datetime.now().isoformat(), ticker, city_code, threshold, yes_price, model_prob, forecast, edge])
+
+                if abs(edge) >= EDGE_THRESHOLD:
+                    edges_found += 1
+                    direction = "BUY YES" if edge > 0 else "SELL YES (buy NO)"
+                    msg = f"🔥 EDGE FOUND\n{ticker} ({market_type})\n{threshold}°F | Kalshi {yes_price}¢ | Model {model_prob}% (~{forecast}°F)\nEdge {edge:+.1f}¢ → {direction}"
+                    send_telegram(msg)
+                    print(f"🔥 {msg}")
+
+                    risk_dollars = BANKROLL * RISK_PER_TRADE
+                    contract_value = yes_price / 100.0
+                    contracts = max(1, int(risk_dollars / contract_value))
+                    side = "yes" if edge > 0 else "no"
+                    price_cents = int(yes_price + 1) if edge > 0 else int(yes_price - 1)
+
+                    if DEMO_MODE:
+                        print(f"   [DEMO] Would place {side} {contracts} @ {price_cents}¢")
+                    # Live order would go here when DEMO_MODE = False
+
+            except Exception:
                 continue
-            city_code, date_str, hour, threshold = parse_ticker(ticker)
-            if not city_code or city_code not in CITY_COORDS:
-                continue
-                
-            yes_price = getattr(m, 'yes_price', 50) or 50
-            lat, lon = CITY_COORDS[city_code]
-            
-            model_prob, forecast = get_model_prob(lat, lon, hour, threshold)
-            edge = model_prob - yes_price
-            
-            # Always log to CSV
-            with open("weather_scans.csv", "a", newline="") as f:
-                writer = csv.writer(f)
-                if f.tell() == 0:
-                    writer.writerow(["timestamp", "ticker", "city", "threshold_f", "kalshi_yes", "model_prob", "forecast_f", "edge_cents"])
-                writer.writerow([datetime.now().isoformat(), ticker, city_code, threshold, yes_price, model_prob, forecast, edge])
-            
-            if abs(edge) >= EDGE_THRESHOLD:
-                direction = "BUY YES" if edge > 0 else "SELL YES (buy NO)"
-                msg = f"🔥 EDGE FOUND\n{ticker}\n{threshold}°F | Kalshi {yes_price}¢ | Model {model_prob}% (~{forecast}°F)\nEdge {edge:+.1f}¢ → {direction}"
-                send_telegram(msg)
-                print(f"🔥 {msg}")
-                
-                risk_dollars = BANKROLL * 0.01
-                contract_value = yes_price / 100.0
-                contracts = max(1, int(risk_dollars / contract_value))
-                side = "yes" if edge > 0 else "no"
-                price_cents = int(yes_price + 1) if edge > 0 else int(yes_price - 1)
-                place_order(ticker, side, contracts, price_cents)
-        
-        print("Cycle complete — sleeping 10 min")
+
+        print(f"Cycle complete — {edges_found} edges found. Sleeping 10 min...")
         time.sleep(600)
-        
+
     except Exception as e:
         print(f"Error: {e}")
         time.sleep(60)
