@@ -13,11 +13,11 @@ from kalshi_python_sync import Configuration, KalshiClient
 load_dotenv()
 
 # ================== CONFIG ==================
-BANKROLL = 1000                  # Starting value — will be updated from Kalshi API
+BANKROLL = 1000
 RISK_PER_TRADE = 0.02
-EDGE_THRESHOLD = 3               # Now 3¢ for all markets
-DEMO_MODE = False                # LIVE TRADING ENABLED
-SCAN_INTERVAL = 180              # 3 minutes
+EDGE_THRESHOLD = 3
+DEMO_MODE = False
+SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 # ============================================
 
@@ -39,15 +39,15 @@ config.api_key_id = API_KEY_ID
 config.private_key_pem = private_key_pem
 client = KalshiClient(config)
 
-# Fetch real bankroll at startup
-try:
-    balance_resp = client.get_balance()
-    BANKROLL = balance_resp.available_balance / 100.0
-    log.info("Live bankroll loaded: $%.2f", BANKROLL)
-except:
-    log.warning("Could not fetch live balance — using $1000 fallback")
-
-CITY_COORDS = { ... }  # (your 13 cities — unchanged)
+CITY_COORDS = {
+    "NYC": (40.7128, -74.0060), "CHI": (41.8781, -87.6298),
+    "MIA": (25.7617, -80.1918), "LAX": (34.0522, -118.2437),
+    "AUS": (30.2672, -97.7431), "DEN": (39.7392, -104.9903),
+    "BOS": (42.3601, -71.0589), "SEA": (47.6062, -122.3321),
+    "PHL": (39.9526, -75.1652), "ATL": (33.7490, -84.3880),
+    "DFW": (32.7767, -96.7970), "HOU": (29.7604, -95.3698),
+    "PHX": (33.4484, -112.0740),
+}
 
 _forecast_cache = {}
 _seen_edges = {}
@@ -61,7 +61,86 @@ def send_telegram(message):
     except:
         pass
 
-# (parse_ticker, minutes_to_expiry, _normal_cdf, get_model_prob, cached_model_prob, log_to_csv remain the same as last version)
+def parse_ticker(ticker):
+    match = re.search(r'KX(TEMP|HIGH|LOWT)([A-Z]+)-(\d{2}[A-Z]{3}\d{2})(\d{2})?-?T?(\d+\.\d+)?', ticker.upper())
+    if match:
+        mtype = match.group(1)
+        city = match.group(2)
+        date_str = match.group(3)
+        hour = int(match.group(4)) if match.group(4) else None
+        threshold = float(match.group(5)) if match.group(5) else None
+        return city, date_str, hour, threshold, mtype
+    return None, None, None, None, None
+
+def minutes_to_expiry(market):
+    close_str = market.get("close_time") or market.get("expiration_time")
+    if not close_str:
+        return float("inf")
+    try:
+        close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
+        now_utc = datetime.now(timezone.utc)
+        return (close_dt - now_utc).total_seconds() / 60.0
+    except:
+        return float("inf")
+
+def _normal_cdf(x):
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
+def get_model_prob(lat, lon, target_hour, threshold_f):
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat, "longitude": lon,
+        "hourly": "temperature_2m,temperature_2m_spread",
+        "models": "gfs_seamless,ecmwf_ifs025",
+        "forecast_days": 2,
+        "timezone": "America/New_York"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        hourly = data.get("hourly", {})
+        temps = hourly.get("temperature_2m", [])
+        spread = hourly.get("temperature_2m_spread", [])
+
+        if target_hour is not None and target_hour < len(temps):
+            forecast_c = temps[target_hour]
+            forecast_f = forecast_c * 9 / 5 + 32
+            sigma_c = spread[target_hour] if (spread and target_hour < len(spread)) else 1.11
+            sigma_f = sigma_c * 9 / 5
+            sigma_f = max(sigma_f, 4.0)
+            z = (forecast_f - threshold_f) / sigma_f
+            prob = _normal_cdf(z) * 100
+            prob = round(max(2.0, min(98.0, prob)), 1)
+            return prob, round(forecast_f, 1), round(sigma_f, 1)
+    except Exception as e:
+        log.warning("Open-Meteo failed: %s", e)
+    return 50.0, None, None
+
+def cached_model_prob(lat, lon, target_hour, threshold_f, cycle_key):
+    cache_key = (lat, lon, target_hour, cycle_key)
+    if cache_key not in _forecast_cache:
+        result = get_model_prob(lat, lon, target_hour, threshold_f)
+        _forecast_cache[cache_key] = result[1], result[2]
+        time.sleep(0.1)
+    forecast_f, sigma_f = _forecast_cache[cache_key]
+    if forecast_f is None or sigma_f is None:
+        return 50.0, forecast_f, sigma_f
+    z = (forecast_f - threshold_f) / sigma_f
+    prob = _normal_cdf(z) * 100
+    prob = round(max(2.0, min(98.0, prob)), 1)
+    return prob, forecast_f, sigma_f
+
+def log_to_csv(row):
+    write_header = not os.path.exists("weather_scans.csv")
+    try:
+        with open("weather_scans.csv", "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["timestamp", "ticker", "city", "threshold_f", "kalshi_yes", "model_prob", "forecast_f", "model_sigma_f", "edge_cents", "action"])
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        log.warning("CSV write failed: %s", e)
 
 def place_order(ticker, side, contracts, price_cents):
     order_data = {
@@ -78,7 +157,7 @@ def place_order(ticker, side, contracts, price_cents):
         global BANKROLL
         cost = contracts * (price_cents / 100.0)
         BANKROLL -= cost
-        msg = f"✅ TRADE PLACED\n{ticker}\n{side.upper()} {contracts} @ {price_cents}¢\nNew balance: ${BANKROLL:.2f}"
+        msg = f"✅ TRADE EXECUTED\n{ticker}\n{side.upper()} {contracts} @ {price_cents}¢\nUpdated bankroll: ${BANKROLL:.2f}"
         send_telegram(msg)
         log.info(msg)
         return True
@@ -87,23 +166,79 @@ def place_order(ticker, side, contracts, price_cents):
         send_telegram(f"❌ Order FAILED: {ticker} - {e}")
         return False
 
-print("🚀 LIVE Kalshi weather bot — scanning every 3 min, 3¢ edge, real money")
+print("🚀 LIVE Kalshi weather bot — 3 min scan, 3¢ edge, real trading active")
 
 while True:
     try:
-        # (market fetch + loop logic from previous version with the new EDGE_THRESHOLD)
-        # ... (same as last version but using EDGE_THRESHOLD = 3 for all markets)
+        resp = requests.get(f"{HOST}/markets", params={"status": "open", "limit": 200}, timeout=15)
+        markets = resp.json().get("markets", []) if resp.ok else []
 
-        if abs(edge) >= EDGE_THRESHOLD:
-            # ... calculate contracts, place_order, etc.
-            direction = "BUY YES" if edge > 0 else "SELL YES (buy NO)"
-            side = "yes" if edge > 0 else "no"
-            price_cents = int(yes_price + 1) if edge > 0 else int(yes_price - 1)
-            contracts = calc_contracts(edge, int(yes_price), side)
-            place_order(ticker, side, contracts, price_cents)
+        log.info("Scanning %d markets...", len(markets))
+        cycle_key = datetime.now().strftime("%Y-%m-%d-%H")
+        _forecast_cache.clear()
 
+        edges_found = 0
+        for m in markets:
+            try:
+                ticker = m.get("ticker", "")
+                if not ticker.startswith("KX"):
+                    continue
+
+                mins_left = minutes_to_expiry(m)
+                if mins_left < MIN_MINS_TO_EXPIRY:
+                    continue
+
+                city_code, date_str, hour, threshold, market_type = parse_ticker(ticker)
+                if not city_code or city_code not in CITY_COORDS or threshold is None:
+                    continue
+
+                yes_price = m.get("yes_price")
+                if yes_price is None:
+                    continue
+
+                lat, lon = CITY_COORDS[city_code]
+                model_prob, forecast_f, sigma_f = cached_model_prob(lat, lon, hour, threshold, cycle_key)
+
+                edge = model_prob - yes_price
+
+                log_to_csv({
+                    "timestamp": datetime.now().isoformat(),
+                    "ticker": ticker,
+                    "city": city_code,
+                    "threshold_f": threshold,
+                    "kalshi_yes": yes_price,
+                    "model_prob": model_prob,
+                    "forecast_f": forecast_f,
+                    "model_sigma_f": sigma_f,
+                    "edge_cents": round(edge, 2),
+                    "action": "none"
+                })
+
+                if abs(edge) >= EDGE_THRESHOLD:
+                    edges_found += 1
+                    direction = "BUY YES" if edge > 0 else "SELL YES (buy NO)"
+                    edge_key = (ticker, direction)
+                    if edge_key in _seen_edges:
+                        continue
+                    _seen_edges[edge_key] = datetime.now()
+
+                    side = "yes" if edge > 0 else "no"
+                    price_cents = int(yes_price + 1) if edge > 0 else int(yes_price - 1)
+                    contracts = max(1, int((BANKROLL * RISK_PER_TRADE) / (yes_price / 100.0)))
+
+                    msg = f"🔥 EDGE FOUND\n{ticker} ({market_type})\n{threshold}°F | Kalshi {yes_price}¢ | Model {model_prob}% (~{forecast_f}°F)\nEdge {edge:+.1f}¢ → {direction}"
+                    send_telegram(msg)
+                    log.info(msg)
+
+                    place_order(ticker, side, contracts, price_cents)
+
+            except Exception as e:
+                log.warning("Error processing %s: %s", ticker, e)
+                continue
+
+        log.info("Cycle complete — %d edges found. Sleeping %ds...", edges_found, SCAN_INTERVAL)
         time.sleep(SCAN_INTERVAL)
 
     except Exception as e:
-        log.exception("Error: %s", e)
+        log.exception("Top-level error: %s", e)
         time.sleep(60)
