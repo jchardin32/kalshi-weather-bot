@@ -83,6 +83,7 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
     return 50, None
 
 print("🚀 Kalshi weather bot (stable working version) started — 13 cities")
+send_telegram("🚀 Kalshi weather bot started - 24/7 on Railway\nBankroll: $1000 | Demo: True"
 
 while True:
     try:
