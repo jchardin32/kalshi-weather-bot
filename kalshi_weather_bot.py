@@ -183,39 +183,57 @@ def place_order(ticker, side, contracts, price_cents):
         send_telegram(f"❌ Order FAILED: {ticker} - {e}")
         return False
 
-print("🚀 LIVE Kalshi weather bot with ticker debug — 3 min scan, 3¢ edge")
+def fetch_weather_markets():
+    markets = []
+    for series in ["KXTEMP", "KXHIGH", "KXLOWT"]:
+        try:
+            r = requests.get(f"{HOST}/markets", params={
+                "status": "open",
+                "limit": 200,
+                "series_ticker": series
+            }, timeout=15)
+            if r.ok:
+                batch = r.json().get("markets", [])
+                markets.extend(batch)
+                log.info("Series %s returned %d markets", series, len(batch))
+            else:
+                log.warning("Series %s fetch failed: HTTP %d", series, r.status_code)
+        except Exception as e:
+            log.warning("Failed to fetch series %s: %s", series, e)
+    log.info("Total weather markets fetched: %d", len(markets))
+    return markets
+
+print("🚀 LIVE Kalshi weather bot — series-based fetch, 3 min scan, 3¢ edge")
 
 while True:
     try:
         BANKROLL = get_current_bankroll()
 
-        resp = requests.get(f"{HOST}/markets", params={"status": "open", "limit": 200}, timeout=15)
-        markets = resp.json().get("markets", []) if resp.ok else []
+        markets = fetch_weather_markets()
 
-        log.info("Scanning %d markets... Bankroll: $%.2f", len(markets), BANKROLL)
         cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"
         _forecast_cache.clear()
 
-        # Expire old edges
         now = datetime.now()
         expired = [k for k, v in _seen_edges.items() if (now - v).total_seconds() >= SEEN_EDGE_TTL_MINUTES * 60]
         for k in expired:
             del _seen_edges[k]
 
         edges_found = 0
+        weather_count = 0
         for m in markets:
             try:
                 ticker = m.get("ticker", "")
-                if not ticker.startswith("KX"):
-                    continue
-
-                log.info("RAW TICKER FOUND: %s", ticker)
 
                 city_code, date_str, hour, threshold, market_type = parse_ticker(ticker)
                 if not city_code or city_code not in CITY_COORDS or threshold is None:
                     continue
 
-                log.info("Parsed TICKER: %s → city=%s hour=%s threshold=%s type=%s", ticker, city_code, hour, threshold, market_type)
+                weather_count += 1
+
+                mins_left = minutes_to_expiry(m)
+                if mins_left < MIN_MINS_TO_EXPIRY:
+                    continue
 
                 yes_price = m.get("yes_price")
                 if yes_price is None:
@@ -262,9 +280,10 @@ while True:
                 log.warning("Error processing %s: %s", ticker, e)
                 continue
 
-        log.info("Cycle complete — %d edges found. Sleeping %ds...", edges_found, SCAN_INTERVAL)
+        log.info("Cycle complete — %d weather markets scanned, %d edges found. Sleeping %ds...", weather_count, edges_found, SCAN_INTERVAL)
         time.sleep(SCAN_INTERVAL)
 
     except Exception as e:
         log.exception("Top-level error: %s", e)
         time.sleep(60)
+
