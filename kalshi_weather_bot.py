@@ -185,25 +185,25 @@ def place_order(ticker, side, contracts, price_cents):
 
 def fetch_weather_markets():
     markets = []
-    for series in ["KXTEMP", "KXHIGH", "KXLOWT"]:
+    for prefix in ["KXTEMP", "KXHIGH", "KXLOWT"]:
         try:
             r = requests.get(f"{HOST}/markets", params={
                 "status": "open",
                 "limit": 200,
-                "series_ticker": series
+                "ticker_prefix": prefix
             }, timeout=15)
             if r.ok:
                 batch = r.json().get("markets", [])
                 markets.extend(batch)
-                log.info("Series %s returned %d markets", series, len(batch))
+                log.info("Prefix %s returned %d markets", prefix, len(batch))
             else:
-                log.warning("Series %s fetch failed: HTTP %d", series, r.status_code)
+                log.warning("Prefix %s fetch failed: HTTP %d — %s", prefix, r.status_code, r.text[:200])
         except Exception as e:
-            log.warning("Failed to fetch series %s: %s", series, e)
+            log.warning("Failed to fetch prefix %s: %s", prefix, e)
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — series-based fetch, 3 min scan, 3¢ edge")
+print("🚀 LIVE Kalshi weather bot — ticker_prefix fetch, 3 min scan, 3¢ edge")
 
 while True:
     try:
@@ -286,4 +286,3 @@ while True:
     except Exception as e:
         log.exception("Top-level error: %s", e)
         time.sleep(60)
-
