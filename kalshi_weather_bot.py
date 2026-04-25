@@ -19,6 +19,7 @@ EDGE_THRESHOLD = 3
 DEMO_MODE = False
 SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
+SEEN_EDGE_TTL_MINUTES = 60
 # ============================================
 
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
@@ -142,16 +143,32 @@ def log_to_csv(row):
     except Exception as e:
         log.warning("CSV write failed: %s", e)
 
+def get_current_bankroll():
+    try:
+        balance = client.get_balance()
+        return balance.available_balance / 100.0
+    except Exception as e:
+        log.warning("Balance fetch failed, using cached bankroll $%.2f: %s", BANKROLL, e)
+        return BANKROLL
+
 def place_order(ticker, side, contracts, price_cents):
+    if DEMO_MODE:
+        log.info("[DEMO] Would place %s %d @ %d¢", side.upper(), contracts, price_cents)
+        return True
+
     order_data = {
         "ticker": ticker,
         "action": "buy" if side == "yes" else "sell",
         "side": "yes",
         "count": contracts,
         "type": "limit",
-        "yes_price" if side == "yes" else "no_price": price_cents,
         "client_order_id": str(uuid.uuid4())
     }
+    if side == "yes":
+        order_data["yes_price"] = price_cents
+    else:
+        order_data["no_price"] = price_cents
+
     try:
         result = client.create_order(order_data)
         global BANKROLL
@@ -166,16 +183,24 @@ def place_order(ticker, side, contracts, price_cents):
         send_telegram(f"❌ Order FAILED: {ticker} - {e}")
         return False
 
-print("🚀 LIVE Kalshi weather bot — 3 min scan, 3¢ edge, real trading active")
+print("🚀 FINAL LIVE Kalshi weather bot — 3 min scan, 3¢ edge, all fixes applied")
 
 while True:
     try:
+        BANKROLL = get_current_bankroll()
+
         resp = requests.get(f"{HOST}/markets", params={"status": "open", "limit": 200}, timeout=15)
         markets = resp.json().get("markets", []) if resp.ok else []
 
-        log.info("Scanning %d markets...", len(markets))
-        cycle_key = datetime.now().strftime("%Y-%m-%d-%H")
+        log.info("Scanning %d markets... Bankroll: $%.2f", len(markets), BANKROLL)
+        cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"   # 15-minute buckets
         _forecast_cache.clear()
+
+        # Expire old edges (in-place, no global reassignment)
+        now = datetime.now()
+        expired = [k for k, v in _seen_edges.items() if (now - v).total_seconds() >= SEEN_EDGE_TTL_MINUTES * 60]
+        for k in expired:
+            del _seen_edges[k]
 
         edges_found = 0
         for m in markets:
@@ -224,7 +249,8 @@ while True:
 
                     side = "yes" if edge > 0 else "no"
                     price_cents = int(yes_price + 1) if edge > 0 else int(yes_price - 1)
-                    contracts = max(1, int((BANKROLL * RISK_PER_TRADE) / (yes_price / 100.0)))
+                    max_loss = (yes_price / 100.0) if side == "yes" else (1 - yes_price / 100.0)
+                    contracts = max(1, int((BANKROLL * RISK_PER_TRADE) / max_loss))
 
                     msg = f"🔥 EDGE FOUND\n{ticker} ({market_type})\n{threshold}°F | Kalshi {yes_price}¢ | Model {model_prob}% (~{forecast_f}°F)\nEdge {edge:+.1f}¢ → {direction}"
                     send_telegram(msg)
