@@ -183,7 +183,7 @@ def place_order(ticker, side, contracts, price_cents):
         send_telegram(f"❌ Order FAILED: {ticker} - {e}")
         return False
 
-print("🚀 FINAL LIVE Kalshi weather bot — 3 min scan, 3¢ edge, all fixes applied")
+print("🚀 LIVE Kalshi weather bot with ticker debug — 3 min scan, 3¢ edge")
 
 while True:
     try:
@@ -193,7 +193,7 @@ while True:
         markets = resp.json().get("markets", []) if resp.ok else []
 
         log.info("Scanning %d markets... Bankroll: $%.2f", len(markets), BANKROLL)
-        cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"   # 15-minute buckets
+        cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"
         _forecast_cache.clear()
 
         # Expire old edges
@@ -209,16 +209,13 @@ while True:
                 if not ticker.startswith("KX"):
                     continue
 
-                mins_left = minutes_to_expiry(m)
-                if mins_left < MIN_MINS_TO_EXPIRY:
-                    continue
+                log.info("RAW TICKER FOUND: %s", ticker)
 
                 city_code, date_str, hour, threshold, market_type = parse_ticker(ticker)
                 if not city_code or city_code not in CITY_COORDS or threshold is None:
                     continue
 
-                # Temporary debug to see what the parser is actually getting
-                log.info("TICKER: %s → city=%s hour=%s threshold=%s type=%s", ticker, city_code, hour, threshold, market_type)
+                log.info("Parsed TICKER: %s → city=%s hour=%s threshold=%s type=%s", ticker, city_code, hour, threshold, market_type)
 
                 yes_price = m.get("yes_price")
                 if yes_price is None:
