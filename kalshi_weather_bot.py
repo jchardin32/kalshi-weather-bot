@@ -146,7 +146,18 @@ def log_to_csv(row):
 def get_current_bankroll():
     try:
         balance = client.get_balance()
-        return balance.available_balance / 100.0
+        log.info("Balance object attributes: %s", dir(balance))
+        log.info("Balance object: %s", balance)
+        
+        if hasattr(balance, 'available_balance'):
+            return balance.available_balance / 100.0
+        elif hasattr(balance, 'balance'):
+            return balance.balance / 100.0
+        elif hasattr(balance, 'available'):
+            return balance.available / 100.0
+        else:
+            log.warning("Unknown balance structure, using cached $%.2f", BANKROLL)
+            return BANKROLL
     except Exception as e:
         log.warning("Balance fetch failed, using cached bankroll $%.2f: %s", BANKROLL, e)
         return BANKROLL
@@ -196,7 +207,6 @@ while True:
         cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"   # 15-minute buckets
         _forecast_cache.clear()
 
-        # Expire old edges (in-place, no global reassignment)
         now = datetime.now()
         expired = [k for k, v in _seen_edges.items() if (now - v).total_seconds() >= SEEN_EDGE_TTL_MINUTES * 60]
         for k in expired:
