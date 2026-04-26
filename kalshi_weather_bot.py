@@ -16,7 +16,7 @@ load_dotenv()
 BANKROLL = 1000
 RISK_PER_TRADE = 0.02
 EDGE_THRESHOLD = 3
-DEMO_MODE = False
+DEMO_MODE = False                 # ← Set to True for demo account
 SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 SEEN_EDGE_TTL_MINUTES = 60
@@ -185,25 +185,33 @@ def place_order(ticker, side, contracts, price_cents):
 
 def fetch_weather_markets():
     markets = []
-    for prefix in ["KXTEMP", "KXHIGH", "KXLOWT"]:
+    cursor = None
+    page = 0
+    while True:
+        params = {"status": "open", "limit": 200}
+        if cursor:
+            params["cursor"] = cursor
         try:
-            r = requests.get(f"{HOST}/markets", params={
-                "status": "open",
-                "limit": 200,
-                "ticker_prefix": prefix
-            }, timeout=15)
-            if r.ok:
-                batch = r.json().get("markets", [])
-                markets.extend(batch)
-                log.info("Prefix %s returned %d markets", prefix, len(batch))
-            else:
-                log.warning("Prefix %s fetch failed: HTTP %d — %s", prefix, r.status_code, r.text[:200])
+            r = requests.get(f"{HOST}/markets", params=params, timeout=15)
+            if not r.ok:
+                log.warning("Market fetch failed: HTTP %d — %s", r.status_code, r.text[:200])
+                break
+            data = r.json()
+            batch = data.get("markets", [])
+            weather_batch = [m for m in batch if any(x in m.get("ticker", "") for x in ["TEMP", "HIGH", "LOWT"])]
+            markets.extend(weather_batch)
+            page += 1
+            log.info("Page %d: %d total, %d weather", page, len(batch), len(weather_batch))
+            cursor = data.get("cursor")
+            if not cursor or len(batch) < 200:
+                break
         except Exception as e:
-            log.warning("Failed to fetch prefix %s: %s", prefix, e)
+            log.warning("Market fetch failed: %s", e)
+            break
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — ticker_prefix fetch, 3 min scan, 3¢ edge")
+print("🚀 LIVE Kalshi weather bot — paginated weather-only fetch, 3 min scan, 3¢ edge")
 
 while True:
     try:
