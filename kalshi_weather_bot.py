@@ -16,7 +16,7 @@ load_dotenv()
 BANKROLL = 1000
 RISK_PER_TRADE = 0.02
 EDGE_THRESHOLD = 3
-DEMO_MODE = False                 # ← Set to True for demo account
+DEMO_MODE = False                 # ← set to False for live trading
 SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 SEEN_EDGE_TTL_MINUTES = 60
@@ -63,13 +63,17 @@ def send_telegram(message):
         pass
 
 def parse_ticker(ticker):
-    match = re.search(r'KX(TEMP|HIGH|LOWT)([A-Z]+)-(\d{2}[A-Z]{3}\d{2})(\d{2})?-?T?(\d+\.\d+)?', ticker.upper())
+    match = re.search(r'KX(TEMP|HIGH|LOWT)([A-Z]+)-(\d{2}[A-Z]{3}\d{2})-?([BT]?[\d.]+)', ticker.upper())
     if match:
         mtype = match.group(1)
         city = match.group(2)
         date_str = match.group(3)
-        hour = int(match.group(4)) if match.group(4) else None
-        threshold = float(match.group(5)) if match.group(5) else None
+        threshold_str = match.group(4).replace('B', '').replace('T', '')
+        try:
+            threshold = float(threshold_str)
+        except ValueError:
+            return None, None, None, None, None
+        hour = None
         return city, date_str, hour, threshold, mtype
     return None, None, None, None, None
 
@@ -105,15 +109,24 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
         spread = hourly.get("temperature_2m_spread", [])
 
         if target_hour is not None and target_hour < len(temps):
+            # Hourly KXTEMP market
             forecast_c = temps[target_hour]
-            forecast_f = forecast_c * 9 / 5 + 32
             sigma_c = spread[target_hour] if (spread and target_hour < len(spread)) else 1.11
-            sigma_f = sigma_c * 9 / 5
-            sigma_f = max(sigma_f, 4.0)
-            z = (forecast_f - threshold_f) / sigma_f
-            prob = _normal_cdf(z) * 100
-            prob = round(max(2.0, min(98.0, prob)), 1)
-            return prob, round(forecast_f, 1), round(sigma_f, 1)
+        else:
+            # Daily KXHIGH / KXLOWT market — use tomorrow's temps (indices 24-47)
+            day_temps = temps[24:48] if len(temps) >= 48 else temps
+            day_spread = spread[24:48] if (spread and len(spread) >= 48) else spread
+            forecast_c = max(day_temps) if day_temps else 15.0
+            sigma_c = max(day_spread) if day_spread else 1.11
+
+        forecast_f = forecast_c * 9 / 5 + 32
+        sigma_f = sigma_c * 9 / 5
+        sigma_f = max(sigma_f, 4.0)
+        z = (forecast_f - threshold_f) / sigma_f
+        prob = _normal_cdf(z) * 100
+        prob = round(max(2.0, min(98.0, prob)), 1)
+        return prob, round(forecast_f, 1), round(sigma_f, 1)
+
     except Exception as e:
         log.warning("Open-Meteo failed: %s", e)
     return 50.0, None, None
@@ -202,28 +215,21 @@ def fetch_weather_markets():
             markets.extend(weather_batch)
             page += 1
             log.info("Page %d: %d total, %d weather", page, len(batch), len(weather_batch))
-            
-            # Debug: log every weather ticker so we can fix the regex
-            for m in weather_batch:
-                ticker = m.get("ticker", "")
-                log.info("WEATHER TICKER FOUND: %s", ticker)
-            
             cursor = data.get("cursor")
             if not cursor or len(batch) < 200:
                 break
-            time.sleep(0.5)  # avoid 429 rate limits
+            time.sleep(0.5)
         except Exception as e:
             log.warning("Market fetch failed: %s", e)
             break
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — paginated weather-only fetch + ticker debug")
+print("🚀 LIVE Kalshi weather bot — paginated fetch, fixed daily high logic, 3 min scan")
 
 while True:
     try:
         BANKROLL = get_current_bankroll()
-
         markets = fetch_weather_markets()
 
         cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"
