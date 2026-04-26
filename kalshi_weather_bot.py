@@ -202,16 +202,23 @@ def fetch_weather_markets():
             markets.extend(weather_batch)
             page += 1
             log.info("Page %d: %d total, %d weather", page, len(batch), len(weather_batch))
+            
+            # Debug: log every weather ticker so we can fix the regex
+            for m in weather_batch:
+                ticker = m.get("ticker", "")
+                log.info("WEATHER TICKER FOUND: %s", ticker)
+            
             cursor = data.get("cursor")
             if not cursor or len(batch) < 200:
                 break
+            time.sleep(0.5)  # avoid 429 rate limits
         except Exception as e:
             log.warning("Market fetch failed: %s", e)
             break
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — paginated weather-only fetch, 3 min scan, 3¢ edge")
+print("🚀 LIVE Kalshi weather bot — paginated weather-only fetch + ticker debug")
 
 while True:
     try:
