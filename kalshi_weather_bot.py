@@ -12,6 +12,7 @@ from kalshi_python_sync import Configuration, KalshiClient
 
 load_dotenv()
 
+# ================== CONFIG ==================
 BANKROLL = 1000
 RISK_PER_TRADE = 0.02
 EDGE_THRESHOLD = 2.0
@@ -20,6 +21,7 @@ SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 SEEN_EDGE_TTL_MINUTES = 60
 DYNAMIC_CITIES = True
+# ============================================
 
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH")
@@ -120,8 +122,9 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
             sigma_c = spread[target_hour] if (spread and target_hour < len(spread)) else 1.11
         else:
             day_temps = temps[24:48] if len(temps) >= 48 else temps
+            day_spread = spread[24:48] if (spread and len(spread) >= 48) else spread
             forecast_c = max(day_temps) if day_temps else 15.0
-            sigma_c = 1.11
+            sigma_c = max(day_spread) if day_spread else 1.11
 
         forecast_f = forecast_c * 9 / 5 + 32
         sigma_f = sigma_c * 9 / 5
@@ -229,7 +232,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 CLEAN RENDER v6 - FORCED REBUILD - April 27 2026 4:30 PM CDT")
+print("🚀 Kalshi weather bot v7 — ECMWF, dynamic cities, fixed sigma, DEMO mode")
 
 while True:
     try:
