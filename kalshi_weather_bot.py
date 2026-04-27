@@ -229,7 +229,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 CLEAN RENDER v5 - April 27 2026 3:15 PM CDT")
+print("🚀 CLEAN RENDER v6 - FORCED REBUILD - April 27 2026 4:30 PM CDT")
 
 while True:
     try:
