@@ -232,7 +232,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 Kalshi weather bot v7 — ECMWF, dynamic cities, fixed sigma, DEMO mode")
+print("🚀 Kalshi weather bot v8 — SCAN diagnostics enabled")
 
 while True:
     try:
@@ -285,8 +285,9 @@ while True:
                 model_prob, forecast_f, sigma_f = cached_model_prob(lat, lon, hour, threshold, cycle_key)
 
                 edge = model_prob - yes_price
-log.info("SCAN: %s | kalshi=%d | model=%.1f | forecast=%.1f | sigma=%.1f | edge=%.1f",
-         ticker, yes_price, model_prob, forecast_f or 0, sigma_f or 0, edge)
+
+                log.info("SCAN: %s | kalshi=%d | model=%.1f | forecast=%.1f | sigma=%.1f | edge=%.1f",
+                         ticker, yes_price, model_prob, forecast_f or 0, sigma_f or 0, edge)
 
                 log_to_csv({
                     "timestamp": datetime.now().isoformat(),
@@ -330,3 +331,4 @@ log.info("SCAN: %s | kalshi=%d | model=%.1f | forecast=%.1f | sigma=%.1f | edge=
     except Exception as e:
         log.exception("Top-level error: %s", e)
         time.sleep(60)
+
