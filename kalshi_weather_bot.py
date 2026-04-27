@@ -285,6 +285,8 @@ while True:
                 model_prob, forecast_f, sigma_f = cached_model_prob(lat, lon, hour, threshold, cycle_key)
 
                 edge = model_prob - yes_price
+log.info("SCAN: %s | kalshi=%d | model=%.1f | forecast=%.1f | sigma=%.1f | edge=%.1f",
+         ticker, yes_price, model_prob, forecast_f or 0, sigma_f or 0, edge)
 
                 log_to_csv({
                     "timestamp": datetime.now().isoformat(),
