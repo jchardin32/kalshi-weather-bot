@@ -15,11 +15,12 @@ load_dotenv()
 # ================== CONFIG ==================
 BANKROLL = 1000
 RISK_PER_TRADE = 0.02
-EDGE_THRESHOLD = 3
-DEMO_MODE = False                 # ← set to False for live trading
+EDGE_THRESHOLD = 2.0
+DEMO_MODE = False
 SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 SEEN_EDGE_TTL_MINUTES = 60
+DYNAMIC_CITIES = True
 # ============================================
 
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
@@ -40,7 +41,7 @@ config.api_key_id = API_KEY_ID
 config.private_key_pem = private_key_pem
 client = KalshiClient(config)
 
-CITY_COORDS = {
+MASTER_CITY_COORDS = {
     "NYC": (40.7128, -74.0060), "CHI": (41.8781, -87.6298),
     "MIA": (25.7617, -80.1918), "LAX": (34.0522, -118.2437),
     "AUS": (30.2672, -97.7431), "DEN": (39.7392, -104.9903),
@@ -48,6 +49,14 @@ CITY_COORDS = {
     "PHL": (39.9526, -75.1652), "ATL": (33.7490, -84.3880),
     "DFW": (32.7767, -96.7970), "HOU": (29.7604, -95.3698),
     "PHX": (33.4484, -112.0740),
+    "STL": (38.6270, -90.1994), "IND": (39.7684, -86.1581),
+    "MEM": (35.1495, -90.0490), "OKC": (35.4676, -97.5164),
+    "MSP": (44.9778, -93.2650), "KC": (39.0997, -94.5786),
+    "CLE": (41.4993, -81.6944), "PIT": (40.4406, -79.9959),
+    "CIN": (39.1031, -84.5120), "NAS": (36.1627, -86.7816),
+    "LOU": (38.2527, -85.7585), "TPA": (27.9506, -82.4572),
+    "ORL": (28.5383, -81.3792), "SFO": (37.7749, -122.4194),
+    "LAS": (36.1699, -115.1398),
 }
 
 _forecast_cache = {}
@@ -96,7 +105,7 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
     params = {
         "latitude": lat, "longitude": lon,
         "hourly": "temperature_2m,temperature_2m_spread",
-        "models": "gfs_seamless,ecmwf_ifs025",
+        "models": "ecmwf_ifs025",
         "forecast_days": 2,
         "timezone": "America/New_York"
     }
@@ -109,11 +118,10 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
         spread = hourly.get("temperature_2m_spread", [])
 
         if target_hour is not None and target_hour < len(temps):
-            # Hourly KXTEMP market
             forecast_c = temps[target_hour]
             sigma_c = spread[target_hour] if (spread and target_hour < len(spread)) else 1.11
         else:
-            # Daily KXHIGH / KXLOWT market — use tomorrow's temps (indices 24-47)
+            # Daily high/low markets — use tomorrow's temps + proper spread
             day_temps = temps[24:48] if len(temps) >= 48 else temps
             day_spread = spread[24:48] if (spread and len(spread) >= 48) else spread
             forecast_c = max(day_temps) if day_temps else 15.0
@@ -225,12 +233,26 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — paginated fetch, fixed daily high logic, 3 min scan")
+print("🚀 LIVE Kalshi weather bot — temperature-only, ECMWF, dynamic cities")
 
 while True:
     try:
         BANKROLL = get_current_bankroll()
+
         markets = fetch_weather_markets()
+
+        active_coords = {}
+        if DYNAMIC_CITIES:
+            seen = set()
+            for m in markets:
+                ticker = m.get("ticker", "")
+                city_code, _, _, _, _ = parse_ticker(ticker)
+                if city_code and city_code in MASTER_CITY_COORDS and city_code not in seen:
+                    seen.add(city_code)
+                    active_coords[city_code] = MASTER_CITY_COORDS[city_code]
+            log.info("Dynamic mode: using %d active cities", len(active_coords))
+        else:
+            active_coords = MASTER_CITY_COORDS.copy()   # explicit fallback
 
         cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"
         _forecast_cache.clear()
@@ -247,7 +269,7 @@ while True:
                 ticker = m.get("ticker", "")
 
                 city_code, date_str, hour, threshold, market_type = parse_ticker(ticker)
-                if not city_code or city_code not in CITY_COORDS or threshold is None:
+                if not city_code or city_code not in active_coords or threshold is None:
                     continue
 
                 weather_count += 1
@@ -260,7 +282,7 @@ while True:
                 if yes_price is None:
                     continue
 
-                lat, lon = CITY_COORDS[city_code]
+                lat, lon = active_coords[city_code]
                 model_prob, forecast_f, sigma_f = cached_model_prob(lat, lon, hour, threshold, cycle_key)
 
                 edge = model_prob - yes_price
