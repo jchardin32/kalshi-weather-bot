@@ -20,12 +20,12 @@ DEMO_MODE = True
 SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 SEEN_EDGE_TTL_MINUTES = 60
-DYNAMIC_CITIES = True
+MAX_PAGES = 20
 # ============================================
 
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH")
-HOST = os.getenv("KALSHI_HOST")
+HOST = os.getenv("KALSHI_HOST")  # must be https://demo.kalshi.co/trade-api/v2
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -41,22 +41,37 @@ config.api_key_id = API_KEY_ID
 config.private_key_pem = private_key_pem
 client = KalshiClient(config)
 
-MASTER_CITY_COORDS = {
-    "NYC": (40.7128, -74.0060), "CHI": (41.8781, -87.6298),
-    "MIA": (25.7617, -80.1918), "LAX": (34.0522, -118.2437),
-    "AUS": (30.2672, -97.7431), "DEN": (39.7392, -104.9903),
-    "BOS": (42.3601, -71.0589), "SEA": (47.6062, -122.3321),
-    "PHL": (39.9526, -75.1652), "ATL": (33.7490, -84.3880),
-    "DFW": (32.7767, -96.7970), "HOU": (29.7604, -95.3698),
-    "PHX": (33.4484, -112.0740),
-    "STL": (38.6270, -90.1994), "IND": (39.7684, -86.1581),
-    "MEM": (35.1495, -90.0490), "OKC": (35.4676, -97.5164),
-    "MSP": (44.9778, -93.2650), "KC": (39.0997, -94.5786),
-    "CLE": (41.4993, -81.6944), "PIT": (40.4406, -79.9959),
-    "CIN": (39.1031, -84.5120), "NAS": (36.1627, -86.7816),
-    "LOU": (38.2527, -85.7585), "TPA": (27.9506, -82.4572),
-    "ORL": (28.5383, -81.3792), "SFO": (37.7749, -122.4194),
-    "LAS": (36.1699, -115.1398),
+# Kalshi city codes → coordinates
+# Codes match actual ticker prefixes from demo.kalshi.co
+CITY_COORDS = {
+    "NY":   (40.7128, -74.0060),  # New York
+    "LAX":  (34.0522, -118.2437), # Los Angeles
+    "AUS":  (30.2672, -97.7431),  # Austin
+    "MIA":  (25.7617, -80.1918),  # Miami
+    "BOS":  (42.3601, -71.0589),  # Boston
+    "TBOS": (42.3601, -71.0589),  # Boston alt
+    "CHI":  (41.8781, -87.6298),  # Chicago
+    "OKC":  (35.4676, -97.5164),  # Oklahoma City
+    "PHIL": (39.9526, -75.1652),  # Philadelphia
+    "ATL":  (33.7490, -84.3880),  # Atlanta
+    "TATL": (33.7490, -84.3880),  # Atlanta alt
+    "DC":   (38.9072, -77.0369),  # Washington DC
+    "TDC":  (38.9072, -77.0369),  # DC alt
+    "DEN":  (39.7392, -104.9903), # Denver
+    "PHX":  (33.4484, -112.0740), # Phoenix
+    "TPHX": (33.4484, -112.0740), # Phoenix alt
+    "SEA":  (47.6062, -122.3321), # Seattle
+    "TSEA": (47.6062, -122.3321), # Seattle alt
+    "HOU":  (29.7604, -95.3698),  # Houston
+    "THOU": (29.7604, -95.3698),  # Houston alt
+    "LV":   (36.1699, -115.1398), # Las Vegas
+    "TLV":  (36.1699, -115.1398), # Las Vegas alt
+    "DAL":  (32.7767, -96.7970),  # Dallas
+    "TDAL": (32.7767, -96.7970),  # Dallas alt
+    "MIN":  (44.9778, -93.2650),  # Minneapolis
+    "TMIN": (44.9778, -93.2650),  # Minneapolis alt
+    "SFO":  (37.7749, -122.4194), # San Francisco
+    "TSFO": (37.7749, -122.4194), # San Francisco alt
 }
 
 _forecast_cache = {}
@@ -72,16 +87,21 @@ def send_telegram(message):
         pass
 
 def parse_ticker(ticker):
-    match = re.search(r'KX(TEMP|HIGH|LOWT)([A-Z]+)-(\d{2}[A-Z]{3}\d{2})-?([BT]?[\d.]+)', ticker.upper())
+    # Matches: KXHIGH, KXLOWT, KXHIGHT, KXTEMP followed by city code and date
+    match = re.search(r'KX(HIGHT?|LOWT|TEMP)([A-Z]+)-(\d{2}[A-Z]{3}\d{2})-?([BT]?[\d.]+)?', ticker.upper())
     if match:
         mtype = match.group(1)
         city = match.group(2)
         date_str = match.group(3)
-        threshold_str = match.group(4).replace('B', '').replace('T', '')
-        try:
-            threshold = float(threshold_str)
-        except ValueError:
-            return None, None, None, None, None
+        threshold_str = match.group(4)
+        if threshold_str:
+            threshold_str = threshold_str.replace('B', '').replace('T', '')
+            try:
+                threshold = float(threshold_str)
+            except ValueError:
+                threshold = None
+        else:
+            threshold = None
         hour = None
         return city, date_str, hour, threshold, mtype
     return None, None, None, None, None
@@ -156,7 +176,9 @@ def log_to_csv(row):
     write_header = not os.path.exists("weather_scans.csv")
     try:
         with open("weather_scans.csv", "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["timestamp", "ticker", "city", "threshold_f", "kalshi_yes", "model_prob", "forecast_f", "model_sigma_f", "edge_cents", "action"])
+            writer = csv.DictWriter(f, fieldnames=["timestamp", "ticker", "city", "threshold_f",
+                                                    "kalshi_yes", "model_prob", "forecast_f",
+                                                    "model_sigma_f", "edge_cents", "action"])
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
@@ -207,18 +229,21 @@ def fetch_weather_markets():
     markets = []
     cursor = None
     page = 0
-    while True:
+    while page < MAX_PAGES:
         params = {"status": "open", "limit": 200}
         if cursor:
             params["cursor"] = cursor
         try:
             r = requests.get(f"{HOST}/markets", params=params, timeout=15)
             if not r.ok:
-                log.warning("Market fetch failed: HTTP %d — %s", r.status_code, r.text[:200])
+                log.warning("Market fetch failed: HTTP %d", r.status_code)
                 break
             data = r.json()
             batch = data.get("markets", [])
-            weather_batch = [m for m in batch if any(x in m.get("ticker", "") for x in ["TEMP", "HIGH", "LOWT"])]
+            weather_batch = [m for m in batch if any(
+                m.get("ticker", "").upper().startswith(p)
+                for p in ["KXHIGH", "KXLOWT", "KXTEMP"]
+            )]
             markets.extend(weather_batch)
             page += 1
             log.info("Page %d: %d total, %d weather", page, len(batch), len(weather_batch))
@@ -232,32 +257,30 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 Kalshi weather bot v8 — SCAN diagnostics enabled")
+print("🚀 Kalshi weather bot v9 — correct host, city codes, regex, page cap")
 
 while True:
     try:
         BANKROLL = get_current_bankroll()
-
         markets = fetch_weather_markets()
 
+        # Build active city list from fetched markets
         active_coords = {}
-        if DYNAMIC_CITIES:
-            seen = set()
-            for m in markets:
-                ticker = m.get("ticker", "")
-                city_code, _, _, _, _ = parse_ticker(ticker)
-                if city_code and city_code in MASTER_CITY_COORDS and city_code not in seen:
-                    seen.add(city_code)
-                    active_coords[city_code] = MASTER_CITY_COORDS[city_code]
-            log.info("Dynamic mode: using %d active cities", len(active_coords))
-        else:
-            active_coords = MASTER_CITY_COORDS.copy()
+        seen = set()
+        for m in markets:
+            ticker = m.get("ticker", "")
+            city_code, _, _, _, _ = parse_ticker(ticker)
+            if city_code and city_code in CITY_COORDS and city_code not in seen:
+                seen.add(city_code)
+                active_coords[city_code] = CITY_COORDS[city_code]
+        log.info("Active cities: %d — %s", len(active_coords), sorted(active_coords.keys()))
 
         cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"
         _forecast_cache.clear()
 
         now = datetime.now()
-        expired = [k for k, v in _seen_edges.items() if (now - v).total_seconds() >= SEEN_EDGE_TTL_MINUTES * 60]
+        expired = [k for k, v in _seen_edges.items()
+                   if (now - v).total_seconds() >= SEEN_EDGE_TTL_MINUTES * 60]
         for k in expired:
             del _seen_edges[k]
 
@@ -269,6 +292,7 @@ while True:
 
                 city_code, date_str, hour, threshold, market_type = parse_ticker(ticker)
                 if not city_code or city_code not in active_coords or threshold is None:
+                    log.info("SKIP: %s → city=%s threshold=%s", ticker, city_code, threshold)
                     continue
 
                 weather_count += 1
@@ -315,20 +339,21 @@ while True:
                     max_loss = (yes_price / 100.0) if side == "yes" else (1 - yes_price / 100.0)
                     contracts = max(1, int((BANKROLL * RISK_PER_TRADE) / max_loss))
 
-                    msg = f"🔥 EDGE FOUND\n{ticker} ({market_type})\n{threshold}°F | Kalshi {yes_price}¢ | Model {model_prob}% (~{forecast_f}°F)\nEdge {edge:+.1f}¢ → {direction}"
+                    msg = (f"🔥 EDGE FOUND\n{ticker} ({market_type})\n"
+                           f"{threshold}°F | Kalshi {yes_price}¢ | Model {model_prob}% (~{forecast_f}°F)\n"
+                           f"Edge {edge:+.1f}¢ → {direction}")
                     send_telegram(msg)
                     log.info(msg)
-
                     place_order(ticker, side, contracts, price_cents)
 
             except Exception as e:
                 log.warning("Error processing %s: %s", ticker, e)
                 continue
 
-        log.info("Cycle complete — %d weather markets scanned, %d edges found. Sleeping %ds...", weather_count, edges_found, SCAN_INTERVAL)
+        log.info("Cycle complete — %d weather markets scanned, %d edges found. Sleeping %ds...",
+                 weather_count, edges_found, SCAN_INTERVAL)
         time.sleep(SCAN_INTERVAL)
 
     except Exception as e:
         log.exception("Top-level error: %s", e)
         time.sleep(60)
-
