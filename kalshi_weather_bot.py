@@ -16,7 +16,7 @@ load_dotenv()
 BANKROLL = 1000
 RISK_PER_TRADE = 0.02
 EDGE_THRESHOLD = 2.0
-DEMO_MODE = False
+DEMO_MODE = True
 SCAN_INTERVAL = 180
 MIN_MINS_TO_EXPIRY = 15
 SEEN_EDGE_TTL_MINUTES = 60
@@ -121,11 +121,9 @@ def get_model_prob(lat, lon, target_hour, threshold_f):
             forecast_c = temps[target_hour]
             sigma_c = spread[target_hour] if (spread and target_hour < len(spread)) else 1.11
         else:
-            # Daily high/low markets — use tomorrow's temps + proper spread
             day_temps = temps[24:48] if len(temps) >= 48 else temps
-            day_spread = spread[24:48] if (spread and len(spread) >= 48) else spread
             forecast_c = max(day_temps) if day_temps else 15.0
-            sigma_c = max(day_spread) if day_spread else 1.11
+            sigma_c = 1.11
 
         forecast_f = forecast_c * 9 / 5 + 32
         sigma_f = sigma_c * 9 / 5
@@ -233,7 +231,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — temperature-only, ECMWF, dynamic cities")
+print("🚀 LIVE Kalshi weather bot — debug logging added for model values")
 
 while True:
     try:
@@ -252,7 +250,7 @@ while True:
                     active_coords[city_code] = MASTER_CITY_COORDS[city_code]
             log.info("Dynamic mode: using %d active cities", len(active_coords))
         else:
-            active_coords = MASTER_CITY_COORDS.copy()   # explicit fallback
+            active_coords = MASTER_CITY_COORDS.copy()
 
         cycle_key = datetime.now().strftime("%Y-%m-%d-%H-%M")[:13] + "0"
         _forecast_cache.clear()
@@ -286,6 +284,10 @@ while True:
                 model_prob, forecast_f, sigma_f = cached_model_prob(lat, lon, hour, threshold, cycle_key)
 
                 edge = model_prob - yes_price
+
+                # ← DEBUG LOG: this will show us exactly what the model is returning
+                log.info("PROCESSED: %s | model_prob=%.1f%% | forecast=%.1f°F | kalshi=%.1f¢ | edge=%.1f¢", 
+                         ticker, model_prob, forecast_f or 0, yes_price, edge)
 
                 log_to_csv({
                     "timestamp": datetime.now().isoformat(),
