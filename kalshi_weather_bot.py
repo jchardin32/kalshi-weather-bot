@@ -231,7 +231,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 DEBUG VERSION v2 - model values will now be logged")
+print("🚀 DEBUG v3 - MODEL LOGGING ACTIVE - April 27 2026 8:10 AM CDT")
 
 while True:
     try:
@@ -285,7 +285,7 @@ while True:
 
                 edge = model_prob - yes_price
 
-                # DEBUG LOG - this must appear if the code is running
+                # THIS IS THE DEBUG LINE WE NEED TO SEE
                 log.info("PROCESSED: %s | model=%.1f%% | forecast=%.1f°F | kalshi=%.1f¢ | edge=%.1f¢", 
                          ticker, model_prob, forecast_f or 0, yes_price, edge)
 
