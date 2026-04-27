@@ -229,7 +229,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 CLEAN START v5 - April 27 2026 2:30 PM CDT")
+print("🚀 CLEAN RENDER v5 - April 27 2026 3:15 PM CDT")
 
 while True:
     try:
@@ -282,9 +282,6 @@ while True:
                 model_prob, forecast_f, sigma_f = cached_model_prob(lat, lon, hour, threshold, cycle_key)
 
                 edge = model_prob - yes_price
-
-                log.info("PROCESSED: %s | model=%.1f%% | forecast=%.1f°F | kalshi=%.1f¢ | edge=%.1f¢", 
-                         ticker, model_prob, forecast_f or 0, yes_price, edge)
 
                 log_to_csv({
                     "timestamp": datetime.now().isoformat(),
