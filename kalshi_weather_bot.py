@@ -231,7 +231,7 @@ def fetch_weather_markets():
     log.info("Total weather markets fetched: %d", len(markets))
     return markets
 
-print("🚀 LIVE Kalshi weather bot — debug logging added for model values")
+print("🚀 LIVE Kalshi weather bot — model debug logging active")
 
 while True:
     try:
@@ -285,8 +285,8 @@ while True:
 
                 edge = model_prob - yes_price
 
-                # ← DEBUG LOG: this will show us exactly what the model is returning
-                log.info("PROCESSED: %s | model_prob=%.1f%% | forecast=%.1f°F | kalshi=%.1f¢ | edge=%.1f¢", 
+                # ← THIS IS THE KEY DEBUG LINE
+                log.info("PROCESSED: %s | model=%.1f%% | forecast=%.1f°F | kalshi=%.1f¢ | edge=%.1f¢", 
                          ticker, model_prob, forecast_f or 0, yes_price, edge)
 
                 log_to_csv({
