@@ -1,7 +1,16 @@
 """
-PCV1 aka V24.5 — Kalshi Weather Bot
+PCV1 aka V24.6 — Kalshi Weather Bot
 ====================================
-Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 review fixes.
+Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 + v24.6 review fixes.
+
+V24.6 (diagnostic)
+  K. Skip-reason counters + scoring loop telemetry. The scoring loop had ~7
+     silent return paths (no lat, no threshold, illiquid, refresh failed,
+     <min_n_members, edge below threshold, bankroll cap, event cap, etc.)
+     making it impossible to know why intents=0 / calib=empty. Now every
+     silent gate increments a global counter, and every loop pass logs
+     'CYCLE skipped:{reason1=N reason2=N ...} processed=N intents=N'.
+     Zero behavior change — pure observability.
 
 V24.5 (hotfix)
   J. Per-coordinate ensemble forecast cache. With ~430 markets across ~50
@@ -545,6 +554,10 @@ def api_get(url: str, params: Optional[dict] = None,
 # ============================================================================
 _metar_cache: dict[tuple, dict] = {}
 # fix #18: removed unused _forecast_cache
+
+# v24.6: skip-reason counters for scoring loop telemetry. Reset every cycle.
+from collections import Counter as _Counter
+_skip_counters: _Counter = _Counter()
 
 # v24.5: ensemble forecast cache. Key shape:
 #   ("temp", round(lat,4), round(lon,4), target_date_str, forecast_days, tz_name)
@@ -2215,7 +2228,7 @@ def run():
 
     paper_profiles = [p.name for p in profiles if p.paper_only]
     live_profiles = [p.name for p in profiles if not p.paper_only]
-    log.info("PCV1/V24 starting | demo=%s live=%s paper=%s",
+    log.info("PCV1/V24.6 starting | demo=%s live=%s paper=%s",
              DEMO_MODE, live_profiles, paper_profiles)
 
     while True:
@@ -2239,17 +2252,33 @@ def run():
             for state in due:
                 hours = state.hours_to_close()
                 if hours * 60 < MIN_MINS_TO_EXPIRY:
+                    _skip_counters["expired_lt_min"] += 1
                     state.next_refresh_at = now + 3600
                     continue
 
                 urgent = is_urgent(state)
                 ok = refresh_market_quote(state, budget, urgent=urgent)
                 if not ok:
+                    _skip_counters["quote_fetch_failed"] += 1
                     state.next_refresh_at = now + (REFRESH_URGENT if urgent else REFRESH_NORMAL)
                     continue
 
+                # v24.6: track illiquid markets (set inside refresh_market_quote)
+                if state.skip_reason and state.skip_reason.startswith("illiquid"):
+                    _skip_counters["illiquid"] += 1
+
                 maybe_refresh_model(state)
                 state.next_refresh_at = now + compute_next_refresh(state, profiles)
+
+                # v24.6: post-model gate visibility
+                if state.lat is None:
+                    _skip_counters["no_lat"] += 1
+                elif state.threshold is None:
+                    _skip_counters["no_threshold"] += 1
+                elif state.model_prob is None:
+                    _skip_counters["no_model_prob"] += 1
+                elif state.skip_reason:
+                    _skip_counters[f"skip_{state.skip_reason.split(':')[0]}"] += 1
 
                 for profile in profiles:
                     intent = evaluate_for_profile(state, profile, tracker)
@@ -2274,6 +2303,16 @@ def run():
                 processed += 1
                 if processed >= 50:
                     break
+
+            # v24.6: per-cycle skip distribution. Logged when we processed
+            # at least one market AND at least one skip was recorded, so
+            # quiet cycles don't spam the log. Counters reset each cycle.
+            if processed > 0 and sum(_skip_counters.values()) > 0:
+                top = _skip_counters.most_common(8)
+                summary = " ".join(f"{k}={v}" for k, v in top)
+                log.info("CYCLE processed=%d intents=%d skipped: %s",
+                         processed, intents_since_heartbeat, summary)
+                _skip_counters.clear()
 
             # v24.1: Telegram flush moved into heartbeat block. Calling
             # force_flush every loop tick made the batcher useless — every
