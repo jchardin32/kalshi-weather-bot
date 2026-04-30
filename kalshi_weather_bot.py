@@ -1,7 +1,16 @@
 """
-PCV1 aka V24.4 — Kalshi Weather Bot
+PCV1 aka V24.5 — Kalshi Weather Bot
 ====================================
-Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 review fixes.
+Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 review fixes.
+
+V24.5 (hotfix)
+  J. Per-coordinate ensemble forecast cache. With ~430 markets across ~50
+     unique cities, repeated identical lat/lon ensemble fetches were tripping
+     Open-Meteo's free-tier 429 rate limit, which starved compute_next_refresh
+     and kept calib=empty / intents=0. Both ensemble call sites now check an
+     in-memory cache keyed on (round(lat,4), round(lon,4), target/month, type)
+     with a 30-min TTL (ensemble runs every 6h on the upstream side, so 30 min
+     is well within freshness). Cache is bounded at 256 entries (LRU-by-time).
 
 V24.4 (hotfix)
   I. Open-Meteo retired /v1/ensemble on api.open-meteo.com and moved it to
@@ -209,6 +218,10 @@ SETTLEMENT_RECONCILE_INTERVAL = 3600  # once an hour
 # Misc
 METAR_CACHE_MAX_ENTRIES = 200
 HEARTBEAT_INTERVAL_SECONDS = 900
+
+# v24.5: per-(lat,lon) ensemble cache to avoid 429s when many markets share a city
+ENSEMBLE_CACHE_TTL_SECONDS = 1800   # 30 min — upstream model cycles every 6h
+ENSEMBLE_CACHE_MAX_ENTRIES = 256
 
 # Secrets / endpoints
 API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
@@ -533,6 +546,12 @@ def api_get(url: str, params: Optional[dict] = None,
 _metar_cache: dict[tuple, dict] = {}
 # fix #18: removed unused _forecast_cache
 
+# v24.5: ensemble forecast cache. Key shape:
+#   ("temp", round(lat,4), round(lon,4), target_date_str, forecast_days, tz_name)
+#   ("precip", round(lat,4), round(lon,4), market_type, contract_year, contract_month, tz_name)
+# Value: (fetched_at_epoch, payload_tuple)
+_ensemble_cache: dict[tuple, tuple] = {}
+
 
 def _trim_metar_cache():
     if len(_metar_cache) <= METAR_CACHE_MAX_ENTRIES:
@@ -541,6 +560,16 @@ def _trim_metar_cache():
     keys_sorted = sorted(_metar_cache.keys(), key=lambda k: k[1])
     for k in keys_sorted[: len(_metar_cache) - METAR_CACHE_MAX_ENTRIES]:
         _metar_cache.pop(k, None)
+
+
+def _trim_ensemble_cache():
+    if len(_ensemble_cache) <= ENSEMBLE_CACHE_MAX_ENTRIES:
+        return
+    # drop oldest by fetched_at
+    keys_sorted = sorted(_ensemble_cache.keys(),
+                         key=lambda k: _ensemble_cache[k][0])
+    for k in keys_sorted[: len(_ensemble_cache) - ENSEMBLE_CACHE_MAX_ENTRIES]:
+        _ensemble_cache.pop(k, None)
 
 
 def fetch_hrrr_forecast(lat: float, lon: float, target_date_str: str,
@@ -588,7 +617,17 @@ def fetch_ensemble_forecast(lat: float, lon: float, target_date_str: str,
                 ecmwf_maxes, gfs_maxes, ecmwf_mins, gfs_mins).
     v24.1: also returns ecmwf/gfs MIN distributions so the disagreement check
     works correctly for LOW markets (was only computing max disagreement).
+    v24.5: per-(lat,lon,date) cache with 30-min TTL eliminates duplicate
+    fetches across markets sharing a city — primary fix for 429 storm.
     """
+    fc_days = min(max(forecast_days, 2), 16)
+    cache_key = ("temp", round(float(lat), 4), round(float(lon), 4),
+                 target_date_str, fc_days, tz_name)
+    now_ts = time.time()
+    cached = _ensemble_cache.get(cache_key)
+    if cached and (now_ts - cached[0]) < ENSEMBLE_CACHE_TTL_SECONDS:
+        return cached[1]
+
     # v24.4: Open-Meteo split /v1/ensemble onto its own subdomain.
     # api.open-meteo.com/v1/ensemble now returns 404; use ensemble-api host.
     url = "https://ensemble-api.open-meteo.com/v1/ensemble"
@@ -596,7 +635,7 @@ def fetch_ensemble_forecast(lat: float, lon: float, target_date_str: str,
         "latitude": lat, "longitude": lon,
         "hourly": "temperature_2m",
         "models": ENSEMBLE_MODELS,
-        "forecast_days": min(max(forecast_days, 2), 16),
+        "forecast_days": fc_days,
         "timezone": tz_name,
     }
     try:
@@ -605,6 +644,7 @@ def fetch_ensemble_forecast(lat: float, lon: float, target_date_str: str,
         data = r.json()
     except (requests.RequestException, ValueError) as e:
         log.warning("Ensemble fetch failed: %s", e)
+        # don't cache failures — let the next caller retry
         return None, None, [], None, [], [], [], []
 
     hourly = data.get("hourly", {})
@@ -647,8 +687,12 @@ def fetch_ensemble_forecast(lat: float, lon: float, target_date_str: str,
             gfs_maxes.append(mx)
             gfs_mins.append(mn)
 
-    return (max_per_member, min_per_member, target_idxs, age_hours,
-            ecmwf_maxes, gfs_maxes, ecmwf_mins, gfs_mins)
+    result = (max_per_member, min_per_member, target_idxs, age_hours,
+              ecmwf_maxes, gfs_maxes, ecmwf_mins, gfs_mins)
+    # v24.5: cache successful fetch
+    _ensemble_cache[cache_key] = (now_ts, result)
+    _trim_ensemble_cache()
+    return result
 
 
 def fetch_metar_temp(metar_id: str, tz_name: str = "America/New_York",
@@ -916,24 +960,38 @@ def precipitation_prob(lat: float, lon: float, threshold_inches: float,
                     calendar.monthrange(contract_year, contract_month)[1])
     days_remaining = max(1, min(16, (last_day - today).days + 1))
 
-    # v24.4: Open-Meteo split /v1/ensemble onto its own subdomain.
-    # api.open-meteo.com/v1/ensemble now returns 404; use ensemble-api host.
-    url = "https://ensemble-api.open-meteo.com/v1/ensemble"
-    params = {
-        "latitude": lat, "longitude": lon,
-        "hourly": "snowfall" if market_type == "SNOW" else "precipitation",
-        "models": ENSEMBLE_MODELS,
-        "forecast_days": days_remaining,
-        "timezone": tz_name,
-        "length_unit": "metric",       # fix #4
-    }
-    try:
-        r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except (requests.RequestException, ValueError) as e:
-        log.warning("Ensemble precip fetch failed: %s", e)
-        return 50.0, None, None, 0, None, "precip", "fetch failed"
+    # v24.5: cache the raw ensemble JSON keyed on (lat,lon,type,year,month,days,tz).
+    # threshold_inches doesn't affect the fetch — it's applied after, so multiple
+    # markets at the same coords with different thresholds share one fetch.
+    precip_cache_key = ("precip", round(float(lat), 4), round(float(lon), 4),
+                        market_type, contract_year, contract_month,
+                        days_remaining, tz_name)
+    now_ts = time.time()
+    cached = _ensemble_cache.get(precip_cache_key)
+    if cached and (now_ts - cached[0]) < ENSEMBLE_CACHE_TTL_SECONDS:
+        data = cached[1]
+    else:
+        # v24.4: Open-Meteo split /v1/ensemble onto its own subdomain.
+        # api.open-meteo.com/v1/ensemble now returns 404; use ensemble-api host.
+        url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+        params = {
+            "latitude": lat, "longitude": lon,
+            "hourly": "snowfall" if market_type == "SNOW" else "precipitation",
+            "models": ENSEMBLE_MODELS,
+            "forecast_days": days_remaining,
+            "timezone": tz_name,
+            "length_unit": "metric",       # fix #4
+        }
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+        except (requests.RequestException, ValueError) as e:
+            log.warning("Ensemble precip fetch failed: %s", e)
+            return 50.0, None, None, 0, None, "precip", "fetch failed"
+        # v24.5: cache successful fetch only
+        _ensemble_cache[precip_cache_key] = (now_ts, data)
+        _trim_ensemble_cache()
 
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
