@@ -1,7 +1,22 @@
 """
-PCV1 aka V24.7 — Kalshi Weather Bot
-====================================
-Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 + v24.6 + v24.7.
+PCV1 aka V24.8 — Kalshi Weather Bot (with Universe Discovery)
+==============================================================
+Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 + v24.6 + v24.7 + v24.8.
+
+V24.8 (universe discovery — observability for non-weather markets)
+  M. After v24.7 shadow-logging revealed weather markets are too thin to
+     trade as a taker (9 liquid quotes per ~9.6k evaluations, no city or
+     time-of-day pattern), we need liquidity data on Kalshi's other
+     market categories before deciding where to deploy. discovery_broadener.py
+     pulls the full Kalshi universe paginated, classifies markets into
+     categories (politics/economics/sports/entertainment/finance/tech),
+     and adds non-weather markets to the registry as observation-only
+     states (lat=None, threshold=None — never produce trade intents).
+     The shadow logger captures their quotes/spreads/sizes every cycle.
+     After 24-72h we'll have hard liquidity data per category and can
+     decide whether to pivot venues or commit to maker mode on weather.
+     Weather trading logic is UNCHANGED. Disable via
+     BROADEN_DISCOVERY_ENABLED=0.
 
 V24.7 (shadow logging — observability, no behavior change)
   L. After 50+ build hours and 0 trades, the live gate cascade (model
@@ -152,6 +167,21 @@ except ImportError:
         pass
     def shadow_settlement_update(*args, **kwargs):  # type: ignore
         pass
+
+# v24.8: broad discovery for non-weather markets. Optional, observation-only.
+try:
+    from discovery_broadener import (
+        discover_all_markets,
+        BROADEN_DISCOVERY_ENABLED,
+        BROADEN_DISCOVERY_INTERVAL_S,
+    )
+    _BROADEN_AVAILABLE = True
+except ImportError:
+    _BROADEN_AVAILABLE = False
+    BROADEN_DISCOVERY_ENABLED = False
+    BROADEN_DISCOVERY_INTERVAL_S = 1800
+    def discover_all_markets(*args, **kwargs):  # type: ignore
+        return {"discovered": 0, "error": "module_not_available"}
 
 if sys.version_info < (3, 10):
     raise RuntimeError("PCV1/V24 requires Python 3.10+ (uses PEP 604 generics).")
@@ -2253,15 +2283,17 @@ def run():
         log.warning("Balance fetch failed: %s", e)
 
     next_discovery_at = 0.0
+    next_broad_discovery_at = 0.0  # v24.8
     next_settlement_at = 0.0
     last_heartbeat = 0.0
     intents_since_heartbeat = 0
 
     paper_profiles = [p.name for p in profiles if p.paper_only]
     live_profiles = [p.name for p in profiles if not p.paper_only]
-    log.info("PCV1/V24.7 starting | demo=%s live=%s paper=%s shadow=%s",
+    log.info("PCV1/V24.8 starting | demo=%s live=%s paper=%s shadow=%s broaden=%s",
              DEMO_MODE, live_profiles, paper_profiles,
-             "on" if _SHADOW_AVAILABLE else "off (shadow_logger.py not found)")
+             "on" if _SHADOW_AVAILABLE else "off (shadow_logger.py not found)",
+             "on" if (_BROADEN_AVAILABLE and BROADEN_DISCOVERY_ENABLED) else "off")
 
     while True:
         try:
@@ -2270,6 +2302,25 @@ def run():
             if now >= next_discovery_at:
                 discover_weather_markets(registry, budget)
                 next_discovery_at = now + DISCOVERY_INTERVAL_SECONDS
+
+            # v24.8: broad discovery for non-weather markets (observation only).
+            # Slower cadence (default 30 min) to protect request budget.
+            if (_BROADEN_AVAILABLE and BROADEN_DISCOVERY_ENABLED
+                    and now >= next_broad_discovery_at):
+                try:
+                    discover_all_markets(
+                        registry, budget,
+                        api_get_func=api_get,
+                        host=HOST,
+                        market_state_factory=MarketState,
+                        existing_count_fn=lambda: sum(
+                            1 for s in registry.states.values()
+                            if s.lat is None  # non-weather markets have no lat
+                        ),
+                    )
+                except Exception as e:
+                    log.warning("Broad discovery failed: %s", e)
+                next_broad_discovery_at = now + BROADEN_DISCOVERY_INTERVAL_S
 
             if now >= next_settlement_at:
                 reconcile_settlements(tracker, calibration, budget)
