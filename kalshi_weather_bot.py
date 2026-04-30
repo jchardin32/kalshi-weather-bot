@@ -1,7 +1,17 @@
 """
-PCV1 aka V24.2 — Kalshi Weather Bot
+PCV1 aka V24.3 — Kalshi Weather Bot
 ====================================
-Incorporates v24 + v24.1 + v24.2 review fixes.
+Incorporates v24 + v24.1 + v24.2 + v24.3 review fixes.
+
+V24.3 (hotfix)
+  H. fetch_weather_series / discover_weather_markets: dict.get(key, [])
+     only returns the [] default when the key is MISSING. If the API
+     returns {"series": null} (which Kalshi can do for empty pages or
+     under partial-auth conditions), the get returned None and the
+     subsequent `for s in series_list` raised TypeError. Now coerced via
+     explicit `if not series_list: series_list = []`. Same fix applied
+     to the markets list in discover_weather_markets, plus an
+     isinstance(item, dict) guard inside the loops.
 
 V24.2 ADJUSTMENTS
   A. _hrrr_blend_weight returns None for hours_to_close <= 0 — caller skips
@@ -1481,8 +1491,15 @@ def fetch_weather_series(budget: RequestBudget) -> list[str]:
                 resp = r.json()
             except ValueError:
                 break
-            series_list = resp.get("series", []) if isinstance(resp, dict) else []
+            # v24.3: dict.get("series", []) only defaults when the key is
+            # missing — if the API returns {"series": null} the get returns
+            # None, and the loop below crashed. Coerce explicitly.
+            series_list = resp.get("series") if isinstance(resp, dict) else None
+            if not series_list:
+                series_list = []
             for s in series_list:
+                if not isinstance(s, dict):
+                    continue
                 t = (s.get("ticker") or "").upper().strip()
                 if t.startswith(WEATHER_SERIES_PREFIXES):
                     all_tickers.add(t)
@@ -1516,8 +1533,13 @@ def discover_weather_markets(registry: MarketRegistry, budget: RequestBudget):
                 resp = r.json()
             except ValueError:
                 break
-            markets = resp.get("markets", []) if isinstance(resp, dict) else []
+            # v24.3: same null-vs-missing guard as fetch_weather_series.
+            markets = resp.get("markets") if isinstance(resp, dict) else None
+            if not markets:
+                markets = []
             for m in markets:
+                if not isinstance(m, dict):
+                    continue
                 ticker = (m.get("ticker") or "").upper()
                 city, date_str, _, threshold, mtype, target_date = parse_ticker(ticker)
                 if not city or threshold is None:
