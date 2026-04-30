@@ -1,7 +1,21 @@
 """
-PCV1 aka V24.6 — Kalshi Weather Bot
+PCV1 aka V24.7 — Kalshi Weather Bot
 ====================================
-Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 + v24.6 review fixes.
+Incorporates v24 + v24.1 + v24.2 + v24.3 + v24.4 + v24.5 + v24.6 + v24.7.
+
+V24.7 (shadow logging — observability, no behavior change)
+  L. After 50+ build hours and 0 trades, the live gate cascade (model
+     skip -> min_members -> price band -> bracket dead-zone -> tail
+     thin -> disagreement -> shrunk edge < threshold -> exposure caps
+     -> dedup) makes it impossible to know whether the bot is filtering
+     out real edge or correctly rejecting noise. shadow_logger.py runs
+     in parallel with the live evaluation: every market, every cycle,
+     it logs model output, market quote, raw + shrunk edges for YES
+     and NO, and which gate (if any) would have stopped each profile.
+     A "gateless" column logs the hypothetical trade you'd take with
+     zero gates so you can compare against settlement and decide
+     whether the underlying signal has alpha at all. Pure observation —
+     no live trading logic touched. Disable via SHADOW_LOG_ENABLED=0.
 
 V24.6 (diagnostic)
   K. Skip-reason counters + scoring loop telemetry. The scoring loop had ~7
@@ -127,6 +141,17 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 from kalshi_python_sync import Configuration, KalshiClient
+
+# v24.7: shadow logging. Optional dependency — bot runs fine without it.
+try:
+    from shadow_logger import shadow_log_evaluation, shadow_settlement_update
+    _SHADOW_AVAILABLE = True
+except ImportError:
+    _SHADOW_AVAILABLE = False
+    def shadow_log_evaluation(*args, **kwargs):  # type: ignore
+        pass
+    def shadow_settlement_update(*args, **kwargs):  # type: ignore
+        pass
 
 if sys.version_info < (3, 10):
     raise RuntimeError("PCV1/V24 requires Python 3.10+ (uses PEP 604 generics).")
@@ -2170,6 +2195,12 @@ def reconcile_settlements(tracker: PositionTracker,
         # Kalshi uses `market_result` on settlement rows: "yes" / "no" / ""
         result = (s.get("market_result") or s.get("result") or "").lower()
 
+        # v24.7: feed shadow logger so the analysis script can join trades
+        # to outcomes. Pass a normalized dict — shadow_logger expects 'ticker'
+        # and 'result' keys. Safe no-op if shadow_logger isn't available.
+        if result in ("yes", "no"):
+            shadow_settlement_update({"ticker": ticker, "result": result})
+
         if not result:
             # row exists but no decisive result yet — capture CLV only
             for p in positions:
@@ -2228,8 +2259,9 @@ def run():
 
     paper_profiles = [p.name for p in profiles if p.paper_only]
     live_profiles = [p.name for p in profiles if not p.paper_only]
-    log.info("PCV1/V24.6 starting | demo=%s live=%s paper=%s",
-             DEMO_MODE, live_profiles, paper_profiles)
+    log.info("PCV1/V24.7 starting | demo=%s live=%s paper=%s shadow=%s",
+             DEMO_MODE, live_profiles, paper_profiles,
+             "on" if _SHADOW_AVAILABLE else "off (shadow_logger.py not found)")
 
     while True:
         try:
@@ -2279,6 +2311,12 @@ def run():
                     _skip_counters["no_model_prob"] += 1
                 elif state.skip_reason:
                     _skip_counters[f"skip_{state.skip_reason.split(':')[0]}"] += 1
+
+                # v24.7: shadow log every evaluation. Read-only, never raises.
+                # Records what each profile WOULD have done, plus a gateless
+                # hypothetical, so we can post-analyze whether gates are
+                # filtering real edge or correctly rejecting noise.
+                shadow_log_evaluation(state, profiles, tracker)
 
                 for profile in profiles:
                     intent = evaluate_for_profile(state, profile, tracker)
